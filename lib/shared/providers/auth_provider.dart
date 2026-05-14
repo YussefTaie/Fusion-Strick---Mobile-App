@@ -1,5 +1,7 @@
 import 'dart:convert';
+import 'dart:io';
 
+import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -118,11 +120,22 @@ class AuthNotifier extends StateNotifier<AuthState> {
       String message = 'Connection failed. Check server & network.';
       if (e.toString().contains('401')) {
         message = 'Invalid credentials';
-      } else if (e.toString().contains('DioException')) {
-        message = 'Cannot reach server. Is the backend running?';
+      } else if (e is DioException) {
+        final uri = e.requestOptions.uri.toString();
+        if (e.error is SocketException) {
+          message = 'Network error: cannot reach $uri';
+        } else if (e.type == DioExceptionType.connectionTimeout ||
+            e.type == DioExceptionType.receiveTimeout) {
+          message = 'Timeout contacting $uri';
+        } else if (e.response != null) {
+          message = 'Server error ${e.response?.statusCode} at $uri';
+        } else {
+          message = 'Cannot reach server at $uri';
+        }
       }
       state = state.copyWith(isLoading: false, errorMessage: message);
       debugPrint('[Auth] Login error: $e');
+      debugPrint('[Auth] Base URL in use: ${ApiConfig.baseUrl}');
       return false;
     }
   }

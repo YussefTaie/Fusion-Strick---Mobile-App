@@ -10,71 +10,123 @@ import '../models/dashboard_stats.dart';
 import '../models/detection_model.dart';
 import '../models/health_status.dart';
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// KPI HELPER FUNCTIONS — aligned with web dashboard SOC logic
-// (Reference: useSocData.js → deriveThreatState / sidebarCounts / socMappers.js)
-// ═══════════════════════════════════════════════════════════════════════════════
-
-/// Count only unread / open alerts.
-///
-/// Web equivalent: `sidebarCounts.alerts = alerts.filter(a => !a.is_read).length`
-int calculateOpenAlerts(List<dynamic> alertsData) {
-  return alertsData
-      .where((a) {
-        // Primary: use is_read field from backend (boolean or int 0/1)
-        final isRead = a['is_read'];
-        if (isRead != null) {
-          if (isRead is bool) return !isRead;
-          if (isRead is int) return isRead == 0;
-          if (isRead is String) return isRead.toLowerCase() != 'true';
-        }
-        // Fallback: treat ATTACK/BLOCK/SUSPICIOUS/MALWARE as active
-        final type = (a['type'] ?? '').toString().toUpperCase();
-        return type == 'ATTACK' || type == 'BLOCK' ||
-               type == 'SUSPICIOUS' || type == 'MALWARE';
-      })
-      .length;
+bool _isReadAlert(Map<String, dynamic> alert) {
+  final isRead = alert['is_read'];
+  if (isRead is bool) return isRead;
+  if (isRead is int) return isRead != 0;
+  if (isRead is String) return isRead.toLowerCase() == 'true';
+  return false;
 }
 
-/// Weighted threat score aligned with web's `deriveThreatState()`.
-///
-/// Web formula:
-///   riskScore = ATTACK_count * 18 + SUSPICIOUS_count * 10 + unreadAlerts * 6
-///   percent   = clamp(riskScore, 12, 100)
-///
-/// We normalize to 0.0–1.0 for mobile widget consumption.
-double calculateThreatScore(List<dynamic> detectionsData, int unreadAlerts) {
-  final attackCount = detectionsData
-      .where((d) => (d['result'] ?? '').toString().toUpperCase() == 'ATTACK')
-      .length;
-  final suspiciousCount = detectionsData
-      .where((d) => (d['result'] ?? '').toString().toUpperCase() == 'SUSPICIOUS')
-      .length;
+int calculateOpenAlerts(List<dynamic> alertsData) {
+  return alertsData.where((raw) {
+    final alert = raw as Map<String, dynamic>;
+    final status = (alert['status'] ?? '').toString().toLowerCase();
+    return !_isReadAlert(alert) && status != 'resolved';
+  }).length;
+}
 
-  final rawScore =
-      (attackCount * 18) + (suspiciousCount * 10) + (unreadAlerts * 6);
-  final percent = math.max(12, math.min(100, rawScore));
+String _normalizeResult(String value, {String attackType = ''}) {
+  final normalized = value.trim().toUpperCase();
+  final attackNormalized = attackType.trim().toUpperCase();
 
+  if (const {'ATTACK', 'MALICIOUS', 'ANOMALY', 'CRITICAL', 'HIGH'}
+      .contains(normalized)) {
+    return 'ATTACK';
+  }
+  if (const {'SUSPICIOUS', 'WARNING', 'MEDIUM'}.contains(normalized)) {
+    return 'SUSPICIOUS';
+  }
+  if (const {'NORMAL', 'BENIGN', 'CLEAN', 'OK'}.contains(normalized)) {
+    return 'NORMAL';
+  }
+  if (attackNormalized.isNotEmpty &&
+      !const {'BENIGN', 'NORMAL', 'OK', 'CLEAN', 'NONE'}
+          .contains(attackNormalized)) {
+    return 'ATTACK';
+  }
+  return 'NORMAL';
+}
+
+String _normalizeAttackLabel(String value, {String result = ''}) {
+  final cleaned = value
+      .replaceAll(RegExp(r'\(conf=.*?\)', caseSensitive: false), '')
+      .replaceAll(RegExp(r'^(ML|ML\+ISO):', caseSensitive: false), '')
+      .replaceAll(RegExp(r'[_\-/]+'), ' ')
+      .trim();
+  final folded = cleaned.replaceAll(RegExp(r'\s+'), ' ').toUpperCase();
+
+  if (const {'', 'BENIGN', 'NORMAL', 'OK', 'CLEAN', 'NONE'}.contains(folded)) {
+    return 'BENIGN';
+  }
+
+  const aliases = <MapEntry<List<String>, String>>[
+    MapEntry(
+      ['DDOS', 'D DOS', 'DOS HULK', 'DOS GOLDENEYE', 'SLOWLORIS', 'SLOWHTTPTEST', 'HEARTBLEED'],
+      'DDoS',
+    ),
+    MapEntry(['PORTSCAN', 'PORT SCAN', 'SCAN'], 'PortScan'),
+    MapEntry(['BRUTEFORCE', 'BRUTE FORCE', 'FTP PATATOR', 'SSH PATATOR', 'PATATOR'], 'BruteForce'),
+    MapEntry(['BOT', 'BOTNET'], 'Bot'),
+    MapEntry(['WEBATTACK', 'WEB ATTACK', 'SQL INJECTION', 'XSS'], 'WebAttack'),
+    MapEntry(['INFILTRATION'], 'Infiltration'),
+    MapEntry(['MALWARE', 'RANSOMWARE', 'BEACON'], 'Malware'),
+  ];
+
+  for (final entry in aliases) {
+    if (entry.key.any((alias) => folded.contains(alias))) return entry.value;
+  }
+
+  if (_normalizeResult(result, attackType: folded) == 'NORMAL') return 'BENIGN';
+  return cleaned.isEmpty ? 'Unknown' : cleaned;
+}
+
+double calculateThreatScore(
+  List<dynamic> detectionsData,
+  List<dynamic> alertsData,
+  List<dynamic> pentestFindings,
+) {
+  final normalizedResults = detectionsData.map((raw) {
+    final detection = raw as Map<String, dynamic>;
+    final attack =
+        (detection['attack_type'] ?? detection['prediction'] ?? detection['label'] ?? '')
+            .toString();
+    return _normalizeResult((detection['result'] ?? detection['label'] ?? '').toString(),
+        attackType: attack);
+  }).toList();
+
+  final total = normalizedResults.length;
+  final attackCount = normalizedResults.where((r) => r == 'ATTACK').length;
+  final suspiciousCount = normalizedResults.where((r) => r == 'SUSPICIOUS').length;
+
+  final maliciousWeight = attackCount + (suspiciousCount * 0.5);
+  final detectionRisk = total > 0 ? (maliciousWeight / total) * 100.0 : 0.0;
+  final alertRisk = math.min(calculateOpenAlerts(alertsData) * 3, 15).toDouble();
+  final pentestRiskRaw = pentestFindings.fold<double>(
+    0,
+    (sum, raw) => sum + ((raw as Map<String, dynamic>)['risk_score'] as num? ?? 0).toDouble(),
+  );
+  final pentestRisk = math.min(pentestRiskRaw * 0.05, 10.0);
+
+  final percent =
+      math.min(100, math.max(0, (detectionRisk + alertRisk + pentestRisk).round()));
   return percent / 100.0;
 }
 
-/// Determine top attack vector from recent detections only.
-///
-/// Web equivalent: `deriveAttackDistribution()` operating on latest ~20 detections
-/// Mobile uses latest 50 for a slightly broader window.
 ({String type, int count}) calculateTopAttack(List<dynamic> detectionsData) {
-  // Take only the most recent detections (already ordered by backend, newest first)
-  final recentDetections = detectionsData.take(50);
-
   final attackCounts = <String, int>{};
-  for (final d in recentDetections) {
-    final attackType = (d['attack_type'] ?? 'UNKNOWN').toString().toUpperCase();
-    final result = (d['result'] ?? '').toString().toUpperCase();
 
-    // Skip benign and normal — only count actual threats
-    if (attackType == 'BENIGN' || result == 'NORMAL') continue;
+  for (final raw in detectionsData) {
+    final detection = raw as Map<String, dynamic>;
+    final rawAttack =
+        (detection['attack_type'] ?? detection['prediction'] ?? detection['label'] ?? '')
+            .toString();
+    final result = _normalizeResult((detection['result'] ?? detection['label'] ?? '').toString(),
+        attackType: rawAttack);
+    final label = _normalizeAttackLabel(rawAttack, result: result);
 
-    attackCounts[attackType] = (attackCounts[attackType] ?? 0) + 1;
+    if (result == 'NORMAL' || label == 'BENIGN') continue;
+    attackCounts[label] = (attackCounts[label] ?? 0) + 1;
   }
 
   String topType = 'None';
@@ -89,68 +141,52 @@ double calculateThreatScore(List<dynamic> detectionsData, int unreadAlerts) {
   return (type: topType, count: topCount);
 }
 
-/// Count critical-level detections: ATTACK, BLOCK, or MALWARE.
-///
-/// Sourced from detections (richer signal than alerts).
 int calculateCriticalCount(List<dynamic> detectionsData) {
-  const criticalResults = {'ATTACK', 'BLOCK', 'MALWARE'};
-  return detectionsData
-      .where((d) =>
-          criticalResults.contains(
-            (d['result'] ?? '').toString().toUpperCase(),
-          ))
-      .length;
+  return detectionsData.where((raw) {
+    final detection = raw as Map<String, dynamic>;
+    final attack =
+        (detection['attack_type'] ?? detection['prediction'] ?? detection['label'] ?? '')
+            .toString();
+    return _normalizeResult((detection['result'] ?? detection['label'] ?? '').toString(),
+            attackType: attack) ==
+        'ATTACK';
+  }).length;
 }
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// DASHBOARD STATS — aggregated from /alerts + /detections (SOC-aligned)
-// ═══════════════════════════════════════════════════════════════════════════════
 
 final dashboardStatsProvider = FutureProvider<DashboardStats>((ref) async {
   final api = ApiService.instance;
 
   try {
-    // Fetch alerts and detections in parallel
     final results = await Future.wait([
-      api.get(ApiConfig.alerts, queryParameters: {'limit': 200}),
-      api.get(ApiConfig.detections, queryParameters: {'limit': 200}),
-      api.get(ApiConfig.actions, queryParameters: {'limit': 200}),
+      api.get(ApiConfig.alerts, queryParameters: {'limit': 12}),
+      api.get(ApiConfig.detections,
+          queryParameters: {'limit': 50, 'include_contained': true}),
+      api.get(ApiConfig.blockedIps),
+      api.get('/pentest/findings', queryParameters: {'limit': 20}),
     ]);
 
     final alertsData = results[0].data as List? ?? [];
     final detectionsData = results[1].data as List? ?? [];
-    final actionsData = results[2].data as List? ?? [];
+    final blockedIpsData = results[2].data as List? ?? [];
+    final pentestFindings = results[3].data as List? ?? [];
 
-    // ── 1. Open / unread alerts (web: sidebarCounts.alerts) ──
     final openAlerts = calculateOpenAlerts(alertsData);
-
-    // ── 2. Weighted threat score (web: deriveThreatState) ──
-    final threatScore = calculateThreatScore(detectionsData, openAlerts);
-
-    // ── 3. Top attack vector — recent detections only ──
+    final threatScore =
+        calculateThreatScore(detectionsData, alertsData, pentestFindings);
     final topAttack = calculateTopAttack(detectionsData);
-
-    // ── 4. Critical count from detections (ATTACK + BLOCK + MALWARE) ──
     final criticalCount = calculateCriticalCount(detectionsData);
-
-    // ── Blocked actions count (unchanged) ──
-    final blockedCount = actionsData
-        .where(
-            (a) => (a['action_type'] ?? '').toString().toUpperCase() == 'BLOCK')
-        .length;
 
     return DashboardStats(
       threatScore: threatScore,
-      totalAlerts: openAlerts, // Now reflects open/unread only
+      totalAlerts: alertsData.length,
       criticalAlerts: criticalCount,
-      blockedAttacks: blockedCount,
-      activeHosts: 0, // Not tracked in mobile lite
+      blockedAttacks: blockedIpsData.length,
+      activeHosts: 0,
       topAttackType: topAttack.type,
       topAttackCount: topAttack.count,
     );
   } catch (e) {
     debugPrint('[DashboardStats] Error fetching: $e');
-    // Return empty stats on error
     return const DashboardStats(
       threatScore: 0,
       totalAlerts: 0,
@@ -163,21 +199,16 @@ final dashboardStatsProvider = FutureProvider<DashboardStats>((ref) async {
   }
 });
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// ALERTS — from GET /alerts
-// ═══════════════════════════════════════════════════════════════════════════════
-
 final alertsProvider = FutureProvider<List<AlertModel>>((ref) async {
   final api = ApiService.instance;
 
   try {
     final response =
-        await api.get(ApiConfig.alerts, queryParameters: {'limit': 50});
+        await api.get(ApiConfig.alerts, queryParameters: {'limit': 12});
     final data = response.data as List? ?? [];
 
     return data.map((json) {
       final map = json as Map<String, dynamic>;
-      // Map backend alert format to AlertModel
       final type = (map['type'] ?? '').toString().toUpperCase();
       String severity;
       if (type == 'ATTACK' || type == 'BLOCK') {
@@ -188,25 +219,16 @@ final alertsProvider = FutureProvider<List<AlertModel>>((ref) async {
         severity = 'medium';
       }
 
-      // Parse is_read status from backend
-      final rawIsRead = map['is_read'];
-      bool isRead = false;
-      if (rawIsRead is bool) {
-        isRead = rawIsRead;
-      } else if (rawIsRead is int) {
-        isRead = rawIsRead != 0;
-      }
-
       return AlertModel(
         id: map['id']?.toString() ?? '',
         sourceIp: map['ip'] ?? 'unknown',
         attackType: map['type'] ?? 'UNKNOWN',
         severity: severity,
-        confidence: 0.0, // Not in alert response
-        timestamp: DateTime.tryParse(map['time']?.toString() ?? '') ??
-            DateTime.now(),
+        confidence: 0.0,
+        timestamp:
+            DateTime.tryParse(map['time']?.toString() ?? '') ?? DateTime.now(),
         message: map['message'] as String?,
-        isRead: isRead,
+        isRead: _isReadAlert(map),
       );
     }).toList();
   } catch (e) {
@@ -215,25 +237,19 @@ final alertsProvider = FutureProvider<List<AlertModel>>((ref) async {
   }
 });
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// LATEST ALERTS (for Home screen preview — max 5)
-// ═══════════════════════════════════════════════════════════════════════════════
-
 final latestAlertsProvider = FutureProvider<List<AlertModel>>((ref) async {
   final allAlerts = await ref.watch(alertsProvider.future);
   return allAlerts.take(5).toList();
 });
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// DETECTIONS — from GET /detections
-// ═══════════════════════════════════════════════════════════════════════════════
-
 final detectionsProvider = FutureProvider<List<DetectionModel>>((ref) async {
   final api = ApiService.instance;
 
   try {
-    final response =
-        await api.get(ApiConfig.detections, queryParameters: {'limit': 50});
+    final response = await api.get(
+      ApiConfig.detections,
+      queryParameters: {'limit': 50, 'include_contained': true},
+    );
     final data = response.data as List? ?? [];
 
     return data
@@ -244,10 +260,6 @@ final detectionsProvider = FutureProvider<List<DetectionModel>>((ref) async {
     return [];
   }
 });
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// HEALTH — from GET /health
-// ═══════════════════════════════════════════════════════════════════════════════
 
 final healthProvider = FutureProvider<HealthStatus>((ref) async {
   final api = ApiService.instance;
@@ -267,12 +279,7 @@ final healthProvider = FutureProvider<HealthStatus>((ref) async {
   }
 });
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// AUTO RESPONSE STATUS — from GET /auto-response/status
-// ═══════════════════════════════════════════════════════════════════════════════
-
-final autoResponseProvider =
-    FutureProvider<Map<String, dynamic>>((ref) async {
+final autoResponseProvider = FutureProvider<Map<String, dynamic>>((ref) async {
   final api = ApiService.instance;
 
   try {

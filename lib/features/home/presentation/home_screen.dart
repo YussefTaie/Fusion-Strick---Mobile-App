@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -15,11 +17,35 @@ import 'widgets/threat_score_ring.dart';
 import 'widgets/top_attack_card.dart';
 
 /// The main dashboard screen showing threat overview and recent alerts.
-class HomeScreen extends ConsumerWidget {
+class HomeScreen extends ConsumerStatefulWidget {
   const HomeScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends ConsumerState<HomeScreen> {
+  Timer? _refreshTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _refreshTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      if (!mounted) return;
+      ref.invalidate(dashboardStatsProvider);
+      ref.invalidate(latestAlertsProvider);
+      ref.invalidate(alertsProvider);
+    });
+  }
+
+  @override
+  void dispose() {
+    _refreshTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final statsAsync = ref.watch(dashboardStatsProvider);
     final alertsAsync = ref.watch(latestAlertsProvider);
 
@@ -71,6 +97,7 @@ class HomeScreen extends ConsumerWidget {
                 delegate: SliverChildListDelegate([
                   // ── Threat Score ──
                   statsAsync.when(
+                    skipLoadingOnReload: true,
                     loading: () => const Center(
                       child: Padding(
                         padding: EdgeInsets.all(AppSpacing.xxxl),
@@ -84,6 +111,7 @@ class HomeScreen extends ConsumerWidget {
 
                   // ── Stats Grid ──
                   statsAsync.when(
+                    skipLoadingOnReload: true,
                     loading: () => GridView.count(
                       crossAxisCount: 2,
                       shrinkWrap: true,
@@ -103,6 +131,7 @@ class HomeScreen extends ConsumerWidget {
 
                   // ── Top Attack ──
                   statsAsync.when(
+                    skipLoadingOnReload: true,
                     loading: () => const LoadingSkeleton.card(),
                     error: (_, __) => const SizedBox.shrink(),
                     data: (stats) => Column(
@@ -126,6 +155,7 @@ class HomeScreen extends ConsumerWidget {
                     trailing: 'View All',
                   ),
                   alertsAsync.when(
+                    skipLoadingOnReload: true,
                     loading: () => Column(
                       children: List.generate(
                         3,
