@@ -8,6 +8,7 @@ class DashboardStats {
     required this.activeHosts,
     required this.topAttackType,
     required this.topAttackCount,
+    required this.topAttackTotal,
   });
 
   final double threatScore; // 0.0 – 1.0
@@ -17,4 +18,5 @@ class DashboardStats {
   final int activeHosts;
   final String topAttackType;
   final int topAttackCount;
+  final int topAttackTotal;
 }

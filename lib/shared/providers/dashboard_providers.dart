@@ -141,6 +141,22 @@ double calculateThreatScore(
   return (type: topType, count: topCount);
 }
 
+int calculateAttackDistributionTotal(List<dynamic> detectionsData) {
+  int total = 0;
+  for (final raw in detectionsData) {
+    final detection = raw as Map<String, dynamic>;
+    final rawAttack =
+        (detection['attack_type'] ?? detection['prediction'] ?? detection['label'] ?? '')
+            .toString();
+    final result = _normalizeResult((detection['result'] ?? detection['label'] ?? '').toString(),
+        attackType: rawAttack);
+    final label = _normalizeAttackLabel(rawAttack, result: result);
+    if (result == 'NORMAL' || label == 'BENIGN') continue;
+    total++;
+  }
+  return total;
+}
+
 int calculateCriticalCount(List<dynamic> detectionsData) {
   return detectionsData.where((raw) {
     final detection = raw as Map<String, dynamic>;
@@ -174,6 +190,7 @@ final dashboardStatsProvider = FutureProvider<DashboardStats>((ref) async {
     final threatScore =
         calculateThreatScore(detectionsData, alertsData, pentestFindings);
     final topAttack = calculateTopAttack(detectionsData);
+    final topAttackTotal = calculateAttackDistributionTotal(detectionsData);
     final criticalCount = calculateCriticalCount(detectionsData);
 
     return DashboardStats(
@@ -184,6 +201,7 @@ final dashboardStatsProvider = FutureProvider<DashboardStats>((ref) async {
       activeHosts: 0,
       topAttackType: topAttack.type,
       topAttackCount: topAttack.count,
+      topAttackTotal: topAttackTotal,
     );
   } catch (e) {
     debugPrint('[DashboardStats] Error fetching: $e');
@@ -195,6 +213,7 @@ final dashboardStatsProvider = FutureProvider<DashboardStats>((ref) async {
       activeHosts: 0,
       topAttackType: 'N/A',
       topAttackCount: 0,
+      topAttackTotal: 0,
     );
   }
 });

@@ -141,9 +141,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                         TopAttackCard(
                           attackType: stats.topAttackType,
                           count: stats.topAttackCount,
-                          total: stats.totalAlerts > 0
-                              ? stats.totalAlerts
-                              : stats.topAttackCount + 1,
+                          total: stats.topAttackTotal > 0
+                              ? stats.topAttackTotal
+                              : stats.topAttackCount,
                         ),
                       ],
                     ),

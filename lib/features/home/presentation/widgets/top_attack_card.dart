@@ -19,7 +19,8 @@ class TopAttackCard extends StatelessWidget {
   final int count;
   final int total;
 
-  double get _percentage => total > 0 ? count / total : 0;
+  double get _percentage =>
+      total > 0 ? (count / total).clamp(0.0, 1.0) : 0.0;
 
   @override
   Widget build(BuildContext context) {
